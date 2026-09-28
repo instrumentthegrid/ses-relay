@@ -1,0 +1,22 @@
+# Attach the relay to the network your application already runs on, e.g. the
+# default network of another compose project (`<project>_default`). No ports
+# are published: only containers on that network can reach ses-relay:2525.
+#
+# Works as a Portainer git stack too; set these in the stack's environment.
+services:
+  ses-relay:
+    build: .
+    image: ses-relay:local
+    restart: unless-stopped
+    environment:
+      AWS_REGION: ${AWS_REGION:?set AWS_REGION to your SES region}
+      ALLOWED_FROM: ${ALLOWED_FROM:?set ALLOWED_FROM to the sender address(es) to allow}
+      ALLOWED_CLIENTS: ${ALLOWED_CLIENTS:-}
+      SES_CONFIGURATION_SET: ${SES_CONFIGURATION_SET:-}
+    networks:
+      - app
+
+networks:
+  app:
+    name: ${APP_NETWORK:?set APP_NETWORK to the existing docker network of your app}
+    external: true

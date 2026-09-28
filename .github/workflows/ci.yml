@@ -1,0 +1,60 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"  # same as the Chainguard base image
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+
+  # The unit tests don't cover the image: base image, dependency install,
+  # entrypoint, and startup config parsing. This does, with no AWS account,
+  # by expecting a 451 when there are no credentials.
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -t ses-relay:ci .
+      - run: |
+          docker run -d --name relay -p 127.0.0.1:2525:2525 \
+            -e AWS_REGION=us-east-1 -e AWS_EC2_METADATA_DISABLED=true \
+            -e ALLOWED_FROM=noreply@example.com ses-relay:ci
+      - name: Smoke test
+        shell: python
+        run: |
+          import smtplib, time
+          for _ in range(30):
+              try:
+                  s = smtplib.SMTP("127.0.0.1", 2525, timeout=5)
+                  break
+              except OSError:
+                  time.sleep(1)
+          else:
+              raise SystemExit("relay never came up")
+          code, _ = s.ehlo()
+          assert code == 250, code
+          try:
+              s.sendmail("evil@example.com", ["a@example.org"], b"From: noreply@example.com\r\n\r\nx")
+              raise SystemExit("disallowed sender accepted")
+          except smtplib.SMTPSenderRefused as e:
+              assert e.smtp_code == 550, e
+          s.rset()
+          try:
+              s.sendmail("noreply@example.com", ["a@example.org"], b"From: noreply@example.com\r\n\r\nx")
+              raise SystemExit("send without credentials succeeded")
+          except smtplib.SMTPDataError as e:
+              assert e.smtp_code == 451, e
+          print("smoke test ok")
+      - if: always()
+        run: docker logs relay
