@@ -22,7 +22,7 @@ from email.utils import getaddresses
 
 import boto3
 from aiosmtpd.controller import Controller
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, NoCredentialsError
 
 # Loopback plus RFC 1918 and IPv6 ULA: typical for a docker network or VPC.
 DEFAULT_ALLOWED_CLIENTS = "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7"
@@ -52,9 +52,16 @@ def parse_networks(value):
     return [ipaddress.ip_network(n.strip()) for n in value.split(",") if n.strip()]
 
 
+def ses_client():
+    # Its own session, as sessions aren't thread-safe and Relay.send calls this from threads.
+    # boto3 itself only reads AWS_DEFAULT_REGION; honor AWS_REGION like the other SDKs do.
+    return boto3.Session().client("ses", region_name=os.environ.get("AWS_REGION") or None)
+
+
 class Relay:
-    def __init__(self, ses, allowed_from, allowed_clients, configuration_set=None):
+    def __init__(self, ses, allowed_from, allowed_clients, configuration_set=None, ses_factory=None):
         self.ses = ses
+        self.ses_factory = ses_factory
         self.addresses, self.domains = allowed_from
         self.networks = allowed_clients
         self.configuration_set = configuration_set
@@ -68,6 +75,19 @@ class Relay:
         if ip.version == 6 and ip.ipv4_mapped:
             ip = ip.ipv4_mapped
         return any(ip in net for net in self.networks)
+
+    def send(self, **params):
+        try:
+            return self.ses.send_raw_email(**params)
+        except NoCredentialsError:
+            if not self.ses_factory:
+                raise
+        # botocore looks for credentials only when a client is created, so one
+        # created before the instance role or IMDS was usable never finds any.
+        # Replace it and retry once. If there are still none, this raises again.
+        log.warning("no AWS credentials, creating a new SES client")
+        self.ses = self.ses_factory()
+        return self.ses.send_raw_email(**params)
 
     async def handle_MAIL(self, server, session, envelope, address, mail_options):
         if not self.client_allowed(session.peer):
@@ -95,7 +115,7 @@ class Relay:
         if self.configuration_set:
             params["ConfigurationSetName"] = self.configuration_set
         try:
-            resp = await asyncio.to_thread(self.ses.send_raw_email, **params)
+            resp = await asyncio.to_thread(self.send, **params)
         except ClientError as e:
             code = e.response.get("Error", {}).get("Code", "")
             log.error("SES rejected %s -> %s: %s", envelope.mail_from, envelope.rcpt_tos, e)
@@ -121,11 +141,11 @@ def main():
     max_bytes = int(os.environ.get("MAX_MESSAGE_BYTES", str(10 * 1024 * 1024)))
 
     relay = Relay(
-        # boto3 itself only reads AWS_DEFAULT_REGION; honor AWS_REGION like the other SDKs do.
-        ses=boto3.client("ses", region_name=os.environ.get("AWS_REGION") or None),
+        ses=ses_client(),
         allowed_from=allowed_from,
         allowed_clients=allowed_clients,
         configuration_set=os.environ.get("SES_CONFIGURATION_SET") or None,
+        ses_factory=ses_client,
     )
     controller = Controller(relay, hostname=host, port=port, data_size_limit=max_bytes)
     controller.start()
