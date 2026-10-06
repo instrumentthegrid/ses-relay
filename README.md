@@ -79,8 +79,12 @@ Grant the role only this:
 }
 ```
 
-If you set `SES_CONFIGURATION_SET`, also add
-`arn:aws:ses:REGION:ACCOUNT_ID:configuration-set/NAME` to `Resource`.
+If you set `SES_CONFIGURATION_SET`, or if the sending identity has a
+default configuration set
+(`aws sesv2 get-email-identity --email-identity DOMAIN --query ConfigurationSetName`),
+also add `arn:aws:ses:REGION:ACCOUNT_ID:configuration-set/NAME` to `Resource`.
+SES applies a default set even though the relay never names it, so without its
+ARN every send fails with `AccessDenied` and the client gets `451`.
 
 ### On EC2
 
