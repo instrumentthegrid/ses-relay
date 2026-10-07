@@ -11,7 +11,7 @@ credentials. ses-relay sits next to the app, speaks SMTP to it, and calls
 `SendRawEmail` with whatever role the host or task already has. The app is
 configured with no SMTP password at all.
 
-About 150 lines of Python on [aiosmtpd](https://github.com/aio-libs/aiosmtpd)
+About 170 lines of Python on [aiosmtpd](https://github.com/aio-libs/aiosmtpd)
 and boto3, in a Chainguard image that runs as nonroot and has no shell.
 
 ## Security model
@@ -100,6 +100,10 @@ aws ec2 modify-instance-metadata-options --instance-id i-0123456789abcdef0 \
 That makes the instance role usable by **every** container on the host, not
 only this one. That's one more reason to keep the role down to the
 single-sender policy above.
+
+If the relay started before the role was attached, while IMDS was unreachable,
+or before the hop limit was raised, it picks up the credentials on the next
+send. No restart is needed.
 
 ## Development
 

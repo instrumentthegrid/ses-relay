@@ -6,6 +6,8 @@ import unittest
 
 import boto3
 from aiosmtpd.controller import Controller
+from botocore.credentials import CredentialResolver
+from botocore.session import get_session
 from botocore.stub import ANY, Stubber
 
 import ses_relay
@@ -22,18 +24,27 @@ def free_port():
         return s.getsockname()[1]
 
 
+def client_without_credentials():
+    # What boto3.client() returns when the credential chain finds nothing.
+    session = get_session()
+    session.register_component("credential_provider", CredentialResolver([]))
+    return session.create_client("ses", region_name="us-west-2")
+
+
 class RelayTest(unittest.TestCase):
-    def start(self, allowed_from=SENDER, allowed_clients="127.0.0.0/8", configuration_set=None):
+    def start(self, allowed_from=SENDER, allowed_clients="127.0.0.0/8", configuration_set=None,
+              ses=None, ses_factory=None):
         os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
         os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
-        ses = boto3.client("ses", region_name="us-west-2")
-        self.stub = Stubber(ses)
+        stubbed = boto3.client("ses", region_name="us-west-2")
+        self.stub = Stubber(stubbed)
         self.stub.activate()
         relay = ses_relay.Relay(
-            ses=ses,
+            ses=ses or stubbed,
             allowed_from=ses_relay.parse_senders(allowed_from),
             allowed_clients=ses_relay.parse_networks(allowed_clients),
             configuration_set=configuration_set,
+            ses_factory=ses_factory or (lambda: stubbed),
         )
         self.port = free_port()
         self.controller = Controller(relay, hostname="127.0.0.1", port=self.port)
@@ -103,6 +114,19 @@ class RelayTest(unittest.TestCase):
         with self.assertRaises(smtplib.SMTPDataError) as cm:
             self.smtp().sendmail(SENDER, ["a@example.org"], MSG)
         self.assertEqual(cm.exception.smtp_code, 554)
+
+    def test_replaces_client_created_without_credentials(self):
+        # As when the instance role is attached after the relay starts.
+        self.start(ses=client_without_credentials())
+        self.stub.add_response("send_raw_email", {"MessageId": "m-3"})
+        self.assertEqual(self.smtp().sendmail(SENDER, ["a@example.org"], MSG), {})
+        self.stub.assert_no_pending_responses()
+
+    def test_missing_credentials_are_temporary(self):
+        self.start(ses=client_without_credentials(), ses_factory=client_without_credentials)
+        with self.assertLogs("ses-relay", "ERROR"), self.assertRaises(smtplib.SMTPDataError) as cm:
+            self.smtp().sendmail(SENDER, ["a@example.org"], MSG)
+        self.assertEqual(cm.exception.smtp_code, 451)
 
 
 class ParsingTest(unittest.TestCase):
